@@ -1,4 +1,4 @@
-%% Copyright (c) 2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2015-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -16,7 +16,7 @@
 
 -export([check_options/1]).
 -export([name/0]).
--export([init/7]).
+-export([init/8]).
 -export([handle/2]).
 -export([close/2]).
 -export([send/2]).
@@ -66,9 +66,9 @@ do_check_options([Opt|_]) ->
 
 name() -> ws.
 
-init(Owner, Socket, Transport, Headers, Extensions, Handler, Opts) ->
-	Owner ! {gun_ws_upgrade, self(), ok, Headers},
-	HandlerState = Handler:init(Owner, Headers, Opts),
+init(Owner, Socket, Transport, StreamRef, Headers, Extensions, Handler, Opts) ->
+	Owner ! {gun_upgrade, self(), StreamRef, [<<"websocket">>], Headers},
+	HandlerState = Handler:init(Owner, StreamRef, Headers, Opts),
 	{upgrade, ?MODULE, #ws_state{owner=Owner, socket=Socket, transport=Transport,
 		extensions=Extensions, handler=Handler, handler_state=HandlerState}}.
 

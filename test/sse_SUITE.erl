@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -14,6 +14,7 @@
 
 -module(sse_SUITE).
 -compile(export_all).
+-compile(nowarn_export_all).
 
 all() ->
 	[http, http2].
@@ -21,7 +22,7 @@ all() ->
 http(_) ->
 	{ok, Pid} = gun:open("sse.now.sh", 443, #{
 		protocols => [http],
-		http_opts => #{content_handlers => [gun_sse, gun_data]}
+		http_opts => #{content_handlers => [gun_sse_h, gun_data_h]}
 	}),
 	{ok, http} = gun:await_up(Pid),
 	common(Pid).
@@ -29,7 +30,7 @@ http(_) ->
 http2(_) ->
 	{ok, Pid} = gun:open("sse.now.sh", 443, #{
 		protocols => [http2],
-		http2_opts => #{content_handlers => [gun_sse, gun_data]}
+		http2_opts => #{content_handlers => [gun_sse_h, gun_data_h]}
 	}),
 	{ok, http2} = gun:await_up(Pid),
 	common(Pid).

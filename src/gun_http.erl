@@ -1,4 +1,4 @@
-%% Copyright (c) 2014-2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2014-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -60,18 +60,18 @@ check_options(Opts) ->
 
 do_check_options([]) ->
 	ok;
-do_check_options([{keepalive, infinity}|Opts]) ->
-	do_check_options(Opts);
-do_check_options([{keepalive, K}|Opts]) when is_integer(K), K > 0 ->
-	do_check_options(Opts);
-do_check_options([{version, V}|Opts]) when V =:= 'HTTP/1.1'; V =:= 'HTTP/1.0' ->
-	do_check_options(Opts);
 do_check_options([Opt={content_handlers, Handlers}|Opts]) ->
 	case gun_content_handler:check_option(Handlers) of
 		ok -> do_check_options(Opts);
 		error -> {error, {options, {http, Opt}}}
 	end;
+do_check_options([{keepalive, infinity}|Opts]) ->
+	do_check_options(Opts);
+do_check_options([{keepalive, K}|Opts]) when is_integer(K), K > 0 ->
+	do_check_options(Opts);
 do_check_options([{transform_header_name, F}|Opts]) when is_function(F) ->
+	do_check_options(Opts);
+do_check_options([{version, V}|Opts]) when V =:= 'HTTP/1.1'; V =:= 'HTTP/1.0' ->
 	do_check_options(Opts);
 do_check_options([Opt|_]) ->
 	{error, {options, {http, Opt}}}.
@@ -80,7 +80,7 @@ name() -> http.
 
 init(Owner, Socket, Transport, Opts) ->
 	Version = maps:get(version, Opts, 'HTTP/1.1'),
-	Handlers = maps:get(content_handlers, Opts, [gun_data]),
+	Handlers = maps:get(content_handlers, Opts, [gun_data_h]),
 	TransformHeaderName = maps:get(transform_header_name, Opts, fun (N) -> N end),
 	#http_state{owner=Owner, socket=Socket, transport=Transport, version=Version,
 		content_handlers=Handlers, transform_header_name=TransformHeaderName}.
@@ -201,8 +201,8 @@ handle_head(Data, State=#http_state{version=ClientVersion,
 	{Version, Status, _, Rest} = cow_http:parse_status_line(Data),
 	{Headers, Rest2} = cow_http:parse_headers(Rest),
 	case {Status, StreamRef} of
-		{101, {websocket, _, WsKey, WsExtensions, WsOpts}} ->
-			ws_handshake(Rest2, State, Headers, WsKey, WsExtensions, WsOpts);
+		{101, {websocket, RealStreamRef, WsKey, WsExtensions, WsOpts}} ->
+			ws_handshake(Rest2, State, RealStreamRef, Headers, WsKey, WsExtensions, WsOpts);
 		{_, _} when Status >= 100, Status =< 199 ->
 			ReplyTo ! {gun_inform, self(), stream_ref(StreamRef), Status, Headers},
 			handle(Rest2, State);
@@ -280,15 +280,21 @@ keepalive(State) ->
 
 request(State=#http_state{socket=Socket, transport=Transport, version=Version,
 		out=head}, StreamRef, ReplyTo, Method, Host, Port, Path, Headers) ->
+	Host2 = case Host of
+		{local, _SocketPath} -> <<>>;
+		Tuple when is_tuple(Tuple) -> inet:ntoa(Tuple);
+		_ -> Host
+	end,
 	Headers2 = lists:keydelete(<<"transfer-encoding">>, 1, Headers),
 	Headers3 = case lists:keymember(<<"host">>, 1, Headers) of
-		false -> [{<<"host">>, [Host, $:, integer_to_binary(Port)]}|Headers2];
+		false -> [{<<"host">>, [Host2, $:, integer_to_binary(Port)]}|Headers2];
 		true -> Headers2
 	end,
 	%% We use Headers2 because this is the smallest list.
 	Conn = conn_from_headers(Version, Headers2),
 	Out = request_io_from_headers(Headers2),
 	Headers4 = case Out of
+		body_chunked when Version =:= 'HTTP/1.0' -> Headers3;
 		body_chunked -> [{<<"transfer-encoding">>, <<"chunked">>}|Headers3];
 		_ -> Headers3
 	end,
@@ -298,10 +304,15 @@ request(State=#http_state{socket=Socket, transport=Transport, version=Version,
 
 request(State=#http_state{socket=Socket, transport=Transport, version=Version,
 		out=head}, StreamRef, ReplyTo, Method, Host, Port, Path, Headers, Body) ->
+	Host2 = case Host of
+		{local, _SocketPath} -> <<>>;
+		Tuple when is_tuple(Tuple) -> inet:ntoa(Tuple);
+		_ -> Host
+	end,
 	Headers2 = lists:keydelete(<<"content-length">>, 1,
 		lists:keydelete(<<"transfer-encoding">>, 1, Headers)),
 	Headers3 = case lists:keymember(<<"host">>, 1, Headers) of
-		false -> [{<<"host">>, [Host, $:, integer_to_binary(Port)]}|Headers2];
+		false -> [{<<"host">>, [Host2, $:, integer_to_binary(Port)]}|Headers2];
 		true -> Headers2
 	end,
 	Headers4 = transform_header_names(State, Headers3),
@@ -419,7 +430,7 @@ request_io_from_headers(Headers) ->
 
 response_io_from_headers(<<"HEAD">>, _, _, _) ->
 	head;
-response_io_from_headers(_, _, 204, _) ->
+response_io_from_headers(_, _, Status, _) when (Status =:= 204) or (Status =:= 304) ->
 	head;
 response_io_from_headers(_, Version, _Status, Headers) ->
 	case lists:keyfind(<<"content-length">>, 1, Headers) of
@@ -454,7 +465,7 @@ is_stream(#http_state{streams=Streams}, StreamRef) ->
 cancel_stream(State=#http_state{streams=Streams}, StreamRef) ->
 	Streams2 = [case Ref of
 		StreamRef ->
-			{Ref, false};
+			Tuple#stream{is_alive=false};
 		_ ->
 			Tuple
 	end || Tuple = #stream{ref=Ref} <- Streams],
@@ -491,7 +502,7 @@ ws_upgrade(State=#http_state{socket=Socket, transport=Transport, owner=Owner, ou
 		{<<"sec-websocket-key">>, Key}
 		|Headers2
 	],
-	IsSecure = Transport:secure(),
+	IsSecure = Transport =:= gun_tls,
 	Headers = case lists:keymember(<<"host">>, 1, Headers0) of
 		true -> Headers3;
 		false when Port =:= 80, not IsSecure -> [{<<"host">>, Host}|Headers3];
@@ -502,26 +513,31 @@ ws_upgrade(State=#http_state{socket=Socket, transport=Transport, owner=Owner, ou
 	new_stream(State#http_state{connection=keepalive, out=head},
 		{websocket, StreamRef, Key, GunExtensions, WsOpts}, Owner, <<"GET">>).
 
-ws_handshake(Buffer, State, Headers, Key, GunExtensions, Opts) ->
+ws_handshake(Buffer, State, StreamRef, Headers, Key, GunExtensions, Opts) ->
 	%% @todo check upgrade, connection
 	case lists:keyfind(<<"sec-websocket-accept">>, 1, Headers) of
 		false ->
 			close;
 		{_, Accept} ->
 			case cow_ws:encode_key(Key) of
-				Accept -> ws_handshake_extensions(Buffer, State, Headers, GunExtensions, Opts);
-				_ -> close
+				Accept ->
+					ws_handshake_extensions(Buffer, State, StreamRef,
+						Headers, GunExtensions, Opts);
+				_ ->
+					close
 			end
 	end.
 
-ws_handshake_extensions(Buffer, State, Headers, GunExtensions, Opts) ->
+ws_handshake_extensions(Buffer, State, StreamRef, Headers, GunExtensions, Opts) ->
 	case lists:keyfind(<<"sec-websocket-extensions">>, 1, Headers) of
 		false ->
-			ws_handshake_protocols(Buffer, State, Headers, #{}, Opts);
+			ws_handshake_protocols(Buffer, State, StreamRef, Headers, #{}, Opts);
 		{_, ExtHd} ->
 			case ws_validate_extensions(cow_http_hd:parse_sec_websocket_extensions(ExtHd), GunExtensions, #{}, Opts) of
-				close -> close;
-				Extensions -> ws_handshake_protocols(Buffer, State, Headers, Extensions, Opts)
+				close ->
+					close;
+				Extensions ->
+					ws_handshake_protocols(Buffer, State, StreamRef, Headers, Extensions, Opts)
 			end
 	end.
 
@@ -543,23 +559,24 @@ ws_validate_extensions(_, _, _, _) ->
 	close.
 
 %% @todo Validate protocols.
-ws_handshake_protocols(Buffer, State, Headers, Extensions, Opts) ->
+ws_handshake_protocols(Buffer, State, StreamRef, Headers, Extensions, Opts) ->
 	case lists:keyfind(<<"sec-websocket-protocol">>, 1, Headers) of
 		false ->
-			ws_handshake_end(Buffer, State, Headers, Extensions,
-				maps:get(default_protocol, Opts, gun_ws_handler), Opts);
+			ws_handshake_end(Buffer, State, StreamRef, Headers, Extensions,
+				maps:get(default_protocol, Opts, gun_ws_h), Opts);
 		{_, Proto} ->
 			ProtoOpt = maps:get(protocols, Opts, []),
 			case lists:keyfind(Proto, 1, ProtoOpt) of
 				{_, Handler} ->
-					ws_handshake_end(Buffer, State, Headers, Extensions, Handler, Opts);
+					ws_handshake_end(Buffer, State, StreamRef,
+						Headers, Extensions, Handler, Opts);
 				false ->
 					close
 			end
 	end.
 
 ws_handshake_end(Buffer, #http_state{owner=Owner, socket=Socket, transport=Transport},
-		Headers, Extensions, Handler, Opts) ->
+		StreamRef, Headers, Extensions, Handler, Opts) ->
 	%% Send ourselves the remaining buffer, if any.
 	_ = case Buffer of
 		<<>> ->
@@ -568,4 +585,4 @@ ws_handshake_end(Buffer, #http_state{owner=Owner, socket=Socket, transport=Trans
 			{OK, _, _} = Transport:messages(),
 			self() ! {OK, Socket, Buffer}
 	end,
-	gun_ws:init(Owner, Socket, Transport, Headers, Extensions, Handler, Opts).
+	gun_ws:init(Owner, Socket, Transport, StreamRef, Headers, Extensions, Handler, Opts).

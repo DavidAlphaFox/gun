@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2013-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -14,6 +14,7 @@
 
 -module(twitter_SUITE).
 -compile(export_all).
+-compile(nowarn_export_all).
 
 all() ->
 	[http, http2].

@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2013-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -17,6 +17,7 @@
 %% Connection.
 -export([open/2]).
 -export([open/3]).
+-export([open_unix/2]).
 -export([info/1]).
 -export([close/1]).
 -export([shutdown/1]).
@@ -90,21 +91,42 @@
 	| {text | binary | close | ping | pong, iodata()}
 	| {close, ws_close_code(), iodata()}.
 
--type opts() :: map().
+-type opts() :: #{
+    connect_timeout => timeout(),
+    http_opts       => http_opts(),
+    http2_opts      => http2_opts(),
+    protocols       => [http | http2],
+    retry           => non_neg_integer(),
+    retry_timeout   => pos_integer(),
+    trace           => boolean(),
+    transport       => tcp | tls | ssl,
+    transport_opts  => [gen_tcp:connect_option()] | [ssl:connect_option()],
+    ws_opts         => ws_opts()
+}.
 -export_type([opts/0]).
 %% @todo Add an option to disable/enable the notowner behavior.
 
--type req_opts() :: map().
+-type req_opts() :: #{
+    reply_to => pid()
+}.
 -export_type([req_opts/0]).
 
--type http_opts() :: map().
+-type http_opts() :: #{
+    keepalive             => timeout(),
+    transform_header_name => fun((binary()) -> binary()),
+    version               => 'HTTP/1.1' | 'HTTP/1.0'
+}.
 -export_type([http_opts/0]).
 
--type http2_opts() :: map().
+-type http2_opts() :: #{
+    keepalive => timeout()
+}.
 -export_type([http2_opts/0]).
 
 %% @todo keepalive
--type ws_opts() :: map().
+-type ws_opts() :: #{
+    compress => boolean()
+}.
 -export_type([ws_opts/0]).
 
 -record(state, {
@@ -124,14 +146,27 @@
 
 %% Connection.
 
--spec open(inet:hostname(), inet:port_number())
+-spec open(inet:hostname() | inet:ip_address(), inet:port_number())
 	-> {ok, pid()} | {error, any()}.
 open(Host, Port) ->
 	open(Host, Port, #{}).
 
--spec open(inet:hostname(), inet:port_number(), opts())
+-spec open(inet:hostname() | inet:ip_address(), inet:port_number(), opts())
 	-> {ok, pid()} | {error, any()}.
-open(Host, Port, Opts) when is_list(Host); is_atom(Host) ->
+open(Host, Port, Opts) when is_list(Host); is_atom(Host); is_tuple(Host) ->
+	do_open(Host, Port, Opts).
+
+-spec open_unix(Path::string(), opts())
+	-> {ok, pid()} | {error, any()}.
+open_unix(SocketPath, Opts) ->
+	do_open({local, SocketPath}, 0, Opts).
+
+do_open(Host, Port, Opts0) ->
+	%% We accept both ssl and tls but only use tls in the code.
+	Opts = case Opts0 of
+		#{transport := ssl} -> Opts0#{transport => tls};
+		_ -> Opts0
+	end,
 	case check_options(maps:to_list(Opts)) of
 		ok ->
 			case supervisor:start_child(gun_sup, [self(), Host, Port, Opts]) of
@@ -185,7 +220,7 @@ check_options([{retry_timeout, T}|Opts]) when is_integer(T), T >= 0 ->
 	check_options(Opts);
 check_options([{trace, B}|Opts]) when B =:= true; B =:= false ->
 	check_options(Opts);
-check_options([{transport, T}|Opts]) when T =:= tcp; T =:= ssl ->
+check_options([{transport, T}|Opts]) when T =:= tcp; T =:= tls ->
 	check_options(Opts);
 check_options([{transport_opts, L}|Opts]) when is_list(L) ->
 	check_options(Opts);
@@ -351,6 +386,7 @@ await(ServerPid, StreamRef, Timeout) ->
 	demonitor(MRef, [flush]),
 	Res.
 
+%% @todo Add gun_upgrade and gun_ws?
 await(ServerPid, StreamRef, Timeout, MRef) ->
 	receive
 		{gun_inform, ServerPid, StreamRef, Status, Headers} ->
@@ -450,9 +486,13 @@ flush_pid(ServerPid) ->
 			flush_pid(ServerPid);
 		{gun_down, ServerPid, _, _, _, _} ->
 			flush_pid(ServerPid);
+		{gun_inform, ServerPid, _, _, _} ->
+			flush_pid(ServerPid);
 		{gun_response, ServerPid, _, _, _, _} ->
 			flush_pid(ServerPid);
 		{gun_data, ServerPid, _, _, _} ->
+			flush_pid(ServerPid);
+		{gun_trailers, ServerPid, _, _} ->
 			flush_pid(ServerPid);
 		{gun_push, ServerPid, _, _, _, _, _, _} ->
 			flush_pid(ServerPid);
@@ -460,9 +500,9 @@ flush_pid(ServerPid) ->
 			flush_pid(ServerPid);
 		{gun_error, ServerPid, _} ->
 			flush_pid(ServerPid);
-		{gun_ws_upgrade, ServerPid, _, _} ->
+		{gun_upgrade, ServerPid, _, _, _} ->
 			flush_pid(ServerPid);
-		{gun_ws, ServerPid, _} ->
+		{gun_ws, ServerPid, _, _} ->
 			flush_pid(ServerPid);
 		{'DOWN', _, process, ServerPid, _} ->
 			flush_pid(ServerPid)
@@ -472,13 +512,21 @@ flush_pid(ServerPid) ->
 
 flush_ref(StreamRef) ->
 	receive
+		{gun_inform, _, StreamRef, _, _} ->
+			flush_pid(StreamRef);
 		{gun_response, _, StreamRef, _, _, _} ->
 			flush_ref(StreamRef);
 		{gun_data, _, StreamRef, _, _} ->
 			flush_ref(StreamRef);
+		{gun_trailers, _, StreamRef, _} ->
+			flush_ref(StreamRef);
 		{gun_push, _, StreamRef, _, _, _, _, _} ->
 			flush_ref(StreamRef);
 		{gun_error, _, StreamRef, _} ->
+			flush_ref(StreamRef);
+		{gun_upgrade, _, StreamRef, _, _} ->
+			flush_ref(StreamRef);
+		{gun_ws, _, StreamRef, _} ->
 			flush_ref(StreamRef)
 	after 0 ->
 		ok
@@ -545,17 +593,17 @@ init(Parent, Owner, Host, Port, Opts) ->
 	ok = proc_lib:init_ack(Parent, {ok, self()}),
 	Retry = maps:get(retry, Opts, 5),
 	Transport = case maps:get(transport, Opts, default_transport(Port)) of
-		tcp -> ranch_tcp;
-		ssl -> ranch_ssl
+		tcp -> gun_tcp;
+		tls -> gun_tls
 	end,
 	OwnerRef = monitor(process, Owner),
 	connect(#state{parent=Parent, owner=Owner, owner_ref=OwnerRef,
 		host=Host, port=Port, opts=Opts, transport=Transport}, Retry).
 
-default_transport(443) -> ssl;
+default_transport(443) -> tls;
 default_transport(_) -> tcp.
 
-connect(State=#state{host=Host, port=Port, opts=Opts, transport=Transport=ranch_ssl}, Retries) ->
+connect(State=#state{host=Host, port=Port, opts=Opts, transport=Transport=gun_tls}, Retries) ->
 	Protocols = [case P of
 		http -> <<"http/1.1">>;
 		http2 -> <<"h2">>
@@ -601,7 +649,7 @@ down(State=#state{owner=Owner, opts=Opts, protocol=Protocol, protocol_state=Prot
 		last_error=Reason}, maps:get(retry, Opts, 5)).
 
 retry(#state{last_error=Reason}, 0) ->
-	error({gone, Reason});
+	exit({shutdown, Reason});
 retry(State=#state{keepalive_ref=KeepaliveRef}, Retries) when is_reference(KeepaliveRef) ->
 	_ = erlang:cancel_timer(KeepaliveRef),
 	%% Flush if we have a keepalive message
@@ -784,6 +832,7 @@ ws_loop(State=#state{parent=Parent, owner=Owner, owner_ref=OwnerRef, socket=Sock
 			error_logger:error_msg("Unexpected message: ~w~n", [Any])
 	end.
 
+-spec owner_gone(_) -> no_return().
 owner_gone(normal) -> exit(normal);
 owner_gone(shutdown) -> exit(shutdown);
 owner_gone(Shutdown = {shutdown, _}) -> exit(Shutdown);

@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -12,22 +12,27 @@
 %% ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
--module(gun_data).
--behavior(gun_content_handler).
+-module(gun_ws_h).
 
--export([init/5]).
--export([handle/3]).
+-export([init/4]).
+-export([handle/2]).
 
 -record(state, {
 	reply_to :: pid(),
-	stream_ref :: reference()
+	stream_ref :: reference(),
+	frag_buffer = <<>> :: binary()
 }).
 
--spec init(pid(), reference(), _, _, _) -> {ok, #state{}}.
-init(ReplyTo, StreamRef, _, _, _) ->
-	{ok, #state{reply_to=ReplyTo, stream_ref=StreamRef}}.
+init(ReplyTo, StreamRef, _, _) ->
+	#state{reply_to=ReplyTo, stream_ref=StreamRef}.
 
--spec handle(fin | nofin, binary(), State) -> {done, State} when State::#state{}.
-handle(IsFin, Data, State=#state{reply_to=ReplyTo, stream_ref=StreamRef}) ->
-	ReplyTo ! {gun_data, self(), StreamRef, IsFin, Data},
-	{done, State}.
+handle({fragment, nofin, _, Payload},
+		State=#state{frag_buffer=SoFar}) ->
+	State#state{frag_buffer= << SoFar/binary, Payload/binary >>};
+handle({fragment, fin, Type, Payload},
+		State=#state{reply_to=ReplyTo, stream_ref=StreamRef, frag_buffer=SoFar}) ->
+	ReplyTo ! {gun_ws, self(), StreamRef, {Type, << SoFar/binary, Payload/binary >>}},
+	State#state{frag_buffer= <<>>};
+handle(Frame, State=#state{reply_to=ReplyTo, stream_ref=StreamRef}) ->
+	ReplyTo ! {gun_ws, self(), StreamRef, Frame},
+	State.

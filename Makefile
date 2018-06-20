@@ -2,7 +2,7 @@
 
 PROJECT = gun
 PROJECT_DESCRIPTION = HTTP/1.1, HTTP/2 and Websocket client for Erlang/OTP.
-PROJECT_VERSION = 1.0.0-pre.2
+PROJECT_VERSION = 1.0.0-rc.1
 
 # Options.
 
@@ -12,11 +12,12 @@ CT_OPTS += -pa test -ct_hooks gun_ct_hook [] # -boot start_sasl
 
 LOCAL_DEPS = ssl
 
-DEPS = cowlib ranch
-dep_cowlib = git https://github.com/ninenines/cowlib master
-dep_ranch = git https://github.com/ninenines/ranch master
+DEPS = cowlib
+dep_cowlib = git https://github.com/ninenines/cowlib 2.4.0
 
-TEST_DEPS = ci.erlang.mk ct_helper
+DOC_DEPS = asciideck
+
+TEST_DEPS = $(if $(CI_ERLANG_MK),ci.erlang.mk) ct_helper
 dep_ct_helper = git https://github.com/extend/ct_helper.git master
 
 # CI configuration.
