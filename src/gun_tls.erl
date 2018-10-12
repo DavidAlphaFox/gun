@@ -14,18 +14,27 @@
 
 -module(gun_tls).
 
+-export([name/0]).
 -export([messages/0]).
+-export([connect/3]).
 -export([connect/4]).
 -export([send/2]).
 -export([setopts/2]).
 -export([sockname/1]).
 -export([close/1]).
 
+name() -> tls.
+
 messages() -> {ssl, ssl_closed, ssl_error}.
+
+-spec connect(inet:socket(), any(), timeout())
+	-> {ok, ssl:sslsocket()} | {error, atom()}.
+connect(Socket, Opts, Timeout) ->
+	ssl:connect(Socket, Opts, Timeout).
 
 -spec connect(inet:ip_address() | inet:hostname(),
 	inet:port_number(), any(), timeout())
-	-> {ok, inet:socket()} | {error, atom()}.
+	-> {ok, ssl:sslsocket()} | {error, atom()}.
 connect(Host, Port, Opts, Timeout) when is_integer(Port) ->
 	ssl:connect(Host, Port,
 		Opts ++ [binary, {active, false}, {packet, raw}],
